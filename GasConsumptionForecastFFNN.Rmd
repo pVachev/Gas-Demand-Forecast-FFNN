@@ -1,0 +1,616 @@
+---
+title: "Gas Consumption Forecasting Using FFNN with Hourly Temperatures in Luxembourg"
+author: "Vachev, Preslav"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+bibliography: references.bib
+link-citations: true
+---
+
+## Introduction 
+
+This project aims to recreate some of the results of the paper of Ravnik et al. [@ravnik2021sigmoid] titled *A sigmoid regression and artificial neural network models for day-ahead
+natural gas usage forecasting*. In this paper the authors use temperature data to compare the forecasting efficiency using Sigmoid model, feed-forward neural network (FFNN) and Recursive Neural Network (RNN) across final consumers based in Slovenia and Croatia. With the use of different numbers of lags of both datasets (gas consumption and temp) they determine that the best model is the recursive with 4 lags of each dataset. 
+
+The scope of today's project is far more limited nonetheless. It only takes a look at the FFNN model and only one dataset pair (temperature and consumption) based only on the city of Luxembourg. 
+
+## Data
+
+Hourly temperature data from 01-01-2020 until 05-25-2025 is provided by Meteostat from the Luxembourg airport weather station and acquired with the used of Python API.
+
+https://meteostat.net/en/station/06590?t=2025-05-16/2025-05-23 
+
+Hourly gas consumption data for residential users was downloaded directly as .xlsx file from the Transparency platform of the European Network of Transmission System Operators for Gas (ENTSOG).
+
+https://transparency.entsog.eu/#/points/data?from=2020-01-01&points=lu-tso-0001dis-00194exit&to=2025-05-25&zoom=hour
+
+## Data Quality
+
+The data is taken across period of 5 years with close to 47 000 thousand entries. 
+
+For this forecast to be meaningful it must be done on a smaller region or a city where temperatures are consistent for the entire region. Other European countries such as Germany and France had complete datasets for gas consumption of residential users, however, those datasets were aggregated either for half or for the entire country. Since Luxembourg is small enough, temperature data would be consistent and meaningful for forecasting of gas demand. 
+
+Greece had a very fragmented gas data stations structure for measurement of consumption of smaller regions and cities but most of those didn't have any reported data but it might be explored in further research.  
+
+## Purpose 
+
+The purpose of this project is to train to implement a neural network model as a forecasting method for gas consumption. Intended future use to price Take-or-Pay contracts with counterparties where actual consumed value at the end of the delivery period results in incurred fees to the buyer in case the volume bought goes below a minimum or above a maximum threshold. 
+
+Important relationship here is that the the lower the temperature, the higher the gas consumption and vice versa. However, there is an exponential change between 10 and 20 degrees. The datasets used in this project show that this relationship holds, affirming that forecasting using FFNN can be performed.  
+
+## Structure 
+
+Initial data wrangling and merging is shown here. Another dataset from measuring gas consumption station near Toulouse was also shown. Since it only covers a year, that part of France was not considered for the project. 
+
+FFNN is performed across 3 R notebook cells with detailed steps of execution in each cell. Performance of the model is measured using R^2 and Mean Absolute Percentage Error (MAPE)
+
+For the FFNN model 3 activation functions are used: 
+
+1. Rectified Linear Unit (ReLU), a.k.a basic linear function $$y = \max(0, x)$$
+2. Tanh or $$\tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}}$$
+3. Sigmoid function or $$\sigma(x) = \frac{1}{1 + e^{-x}}$$
+
+The model in those 3 cells is the same with different number of lags as in the original paper. 
+
+The first FFNN render contains non-cumulative input layers of 3 lags of temperature and gas:  
+   $$(T_{j-1}, P_{j-1}), (T_{j-2}, P_{j-2}), (T_{j-3}, P_{j-3})$$  
+   where \(P\) denotes consumption and \(T\) temperature.
+
+2. The second one contains cumulative input layers of 3 lags of temperature and gas:  
+   $$(T_{j-1}, P_{j-1}), (T_{j-1}, P_{j-1}, T_{j-2}, P_{j-2}), (T_{j-1}, P_{j-1}, T_{j-2}, P_{j-2}, T_{j-3}, P_{j-3})$$
+
+3. The third one considers cumulative input layers of either consumption or gas only:  
+   $$(T_{j-1}), (T_{j-1}, T_{j-2}), (T_{j-1}, T_{j-2}, T_{j-3})$$  
+   $$(P_{j-1}), (P_{j-1}, P_{j-2}), (P_{j-1}, P_{j-2}, P_{j-3})$$
+
+Each model has 2 hidden layers - 32-node and 16-node and 1-node output layer. 
+
+Each render shows the plot for each individual run as shown in the output tables. First FFNN model cell has 9 table entries and 9 plots, Second one has, too, 9 table entries and 9 plots while the third one shows 
+
+The prediction is performed on the last 365 days of the gas consumption sample.
+
+Optimisation method used is Adam Optimisation instead of the Genetic Optimisation since the genetic one posed a greater challenge in execution as well as in performance. 
+
+Finally, a plot of the direct relationship between temperature and gas consumption is shown for the entire 5-year dataset in Luxembourg. 
+
+Conclusion and next steps are presented after the last plot. 
+
+
+```{r}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 4
+)
+library(ggplot2)
+library(scales)
+library(tidyverse)
+library(openxlsx)
+library(lubridate)
+library(dplyr)
+library(keras)
+library(caret)
+```
+
+
+```{r}
+data_Toulouse <- read.xlsx("Toulouse_Distribution.xlsx")
+
+data_Luxembourg <- read.xlsx("Luxembourg_Distribution.xlsx")
+
+temp_data_lux <- read.xlsx("luxembourg_hourly_temp.xlsx")
+
+```
+
+```{r}
+# Convert date columns to POSIXct
+data_Toulouse$periodFrom <- as.POSIXct(data_Toulouse$periodFrom, format = "%Y-%m-%d %H:%M")
+data_Toulouse$periodTo <- as.POSIXct(data_Toulouse$periodTo, format = "%Y-%m-%d %H:%M")
+
+data_Luxembourg$periodFrom <- as.POSIXct(data_Luxembourg$periodFrom, format = "%Y-%m-%d %H:%M")
+data_Luxembourg$periodTo <- as.POSIXct(data_Luxembourg$periodTo, format = "%Y-%m-%d %H:%M")
+
+# Convert Excel numeric time to POSIXct for temp_data_lux
+
+# If your column is called 'time' and is numeric like 43831.00
+temp_data_lux <- temp_data_lux %>%
+  mutate(
+    time = as.POSIXct("1899-12-30", tz = "UTC") + days(floor(time)) + hours(round((time %% 1) * 24)))
+
+data_Luxembourg <- data_Luxembourg %>%
+  mutate(periodFrom = with_tz(periodFrom, tzone = "UTC")) %>%
+  select(-periodTo)
+
+```
+
+
+
+```{r}
+# Merge Luxembourg consumption and temperature by matching time columns
+merged_df <- left_join(data_Luxembourg, temp_data_lux, by = c("periodFrom" = "time"))
+
+```
+
+
+
+```{r}
+
+data_Toulouse <- data_Toulouse[-(1:96), ]
+
+ggplot(data_Toulouse, aes(x = periodFrom, y = value)) +
+  geom_point(color = "steelblue", size = 0.4) +
+  scale_x_datetime(
+    date_breaks = "1 month",
+    labels = function(x) {
+      x_lt <- as.POSIXlt(x)
+      ifelse(month(x_lt) == 1,
+             format(x_lt, "%b %Y"),  # e.g., "Jan 2024"
+             format(x_lt, "%b"))     # e.g., "Feb", "Mar", ...
+    },
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    x = "Date",
+    y = "Value (kWh)",
+    title = "Hourly Allocation Flow"
+  )
+```
+
+```{r}
+
+ggplot(data_Luxembourg, aes(x = periodFrom, y = value)) +
+  geom_point(color = "darkred", size = 0.1) + 
+  scale_x_datetime(
+    date_breaks = "1 year",
+    date_labels = "%Y",
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5)
+  ) +
+  labs(
+    x = "Year",
+    y = "Value (kWh)",
+    title = "Hourly Allocation Flow"
+  )
+
+```
+
+
+
+
+
+
+
+```{r}
+# --- FFNN: Multiple Lags with Multiple Activations ---
+
+
+# Configuration
+lags_to_test  <- 1:3                       # Number of days lag to test (1,2,3)
+activations   <- c("sigmoid", "tanh", "relu")  # Activations to compare
+holdout_hours <- 365 * 24                  # Last 365 days of hourly data
+results       <- list()
+
+# Loop over lag configurations
+for (day_lag in lags_to_test) {
+  offset <- day_lag * 24
+
+  # Prepare dataframe with current-day temp and lagged consumption & temperature
+  ffnn_df <- merged_df %>%
+    select(date        = periodFrom,
+           consumption = value,
+           temperature = temp) %>%
+    arrange(date) %>%
+    mutate(
+      temp_current = temperature,
+      !!paste0("cons_lag", day_lag) := lag(consumption, offset),
+      !!paste0("temp_lag", day_lag) := lag(temperature, offset)
+    ) %>%
+    filter(!is.na(!!sym(paste0("cons_lag", day_lag))) &
+           !is.na(!!sym(paste0("temp_lag", day_lag))))
+
+  # Split into train/test
+  train_df <- head(ffnn_df, -holdout_hours)
+  test_df  <- tail(ffnn_df, holdout_hours)
+
+  # Define variables to scale
+  scale_vars <- c("consumption", "temp_current",
+                  paste0("cons_lag", day_lag), paste0("temp_lag", day_lag))
+  preproc    <- preProcess(train_df[, scale_vars], method = c("center","scale"))
+  train_scaled <- predict(preproc, train_df)
+  test_scaled  <- predict(preproc, test_df)
+
+  # Prepare matrices for Keras
+  x_train <- as.matrix(
+    train_scaled[, c("temp_current",
+                     paste0("cons_lag", day_lag),
+                     paste0("temp_lag", day_lag))]
+  )
+  y_train <- train_scaled$consumption
+  x_test  <- as.matrix(
+    test_scaled[, c("temp_current",
+                    paste0("cons_lag", day_lag),
+                    paste0("temp_lag", day_lag))]
+  )
+  y_test  <- test_scaled$consumption
+
+  # Loop over activation functions
+  for (act in activations) {
+    # Build model
+    model <- keras_model_sequential() %>%
+      layer_dense(32, activation = act, input_shape = ncol(x_train)) %>%
+      layer_dense(16, activation = act) %>%
+      layer_dense(1,  activation = 'linear')
+    model %>% compile(
+      loss      = 'mse',
+      optimizer = optimizer_adam(),
+      metrics   = list('mean_absolute_error')
+    )
+
+    # Train model
+    model %>% fit(
+      x_train, y_train,
+      epochs     = 10,
+      batch_size = 32,
+      verbose    = 0
+    )
+
+    # Predict
+    pred_scaled     <- model %>% predict(x_test)
+    mean_y          <- preproc$mean['consumption']
+    std_y           <- preproc$std['consumption']
+    pred_unscaled   <- as.vector(pred_scaled * std_y + mean_y)
+    actual_unscaled <- as.vector(y_test * std_y + mean_y)
+
+    # Compute metrics
+    valid_idx     <- !is.na(actual_unscaled) & !is.na(pred_unscaled)
+    actual_valid  <- actual_unscaled[valid_idx]
+    pred_valid    <- pred_unscaled[valid_idx]
+    r2 <- if(length(actual_valid) > 1 && sd(actual_valid) > 0 && sd(pred_valid) > 0) cor(actual_valid, pred_valid)^2 else NA_real_
+    nonzero_idx <- actual_valid != 0
+    mape <- if(any(nonzero_idx)) mean(abs((actual_valid[nonzero_idx] - pred_valid[nonzero_idx]) / actual_valid[nonzero_idx]))*100 else NA_real_
+
+    # Store result
+    results[[paste0('lag', day_lag, '_', act)]] <- tibble(
+      lag        = day_lag,
+      activation = act,
+      R2         = r2,
+      MAPE       = mape
+    )
+
+    # Plot for this combination
+    plot_df <- tibble(
+      date      = test_df$date,
+      Actual    = actual_unscaled,
+      Predicted = pred_unscaled
+    ) %>% arrange(date)
+
+    p <- ggplot(plot_df, aes(x = date)) +
+        geom_point(aes(y = Actual,    color = 'Actual'), alpha = 0.6, size = 0.5) +
+        geom_point(aes(y = Predicted, color = 'Predicted'), alpha = 0.6, size = 0.5) +
+        scale_color_manual(values = c('Actual'='blue','Predicted'='red')) +
+        scale_x_datetime(date_breaks='1 month', date_labels='%b %Y', expand=c(0,0)) +
+        scale_y_continuous(labels=scales::comma) +
+      labs(title = paste0("Lag = ", day_lag, " day(s), Activation = ", act,
+                          ", R² = ", round(r2, 3),
+                          ", MAPE = ", round(mape, 1), "%"),
+           subtitle = paste0("Test: ", format(min(plot_df$date), "%Y-%m-%d"),
+                             " to ", format(max(plot_df$date), "%Y-%m-%d")),
+           x = "Date", y = "Consumption") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p)
+  }
+}
+
+# Combine and display summary table
+final_results <- bind_rows(results)
+print(final_results)
+
+
+```
+
+```{r}
+# --- FFNN: Cumulative Lags (1–3 days) with Multiple Activations ---
+
+
+# Configuration
+lags_to_test  <- 1:3                       # Number of days lag to test (1,2,3)
+activations   <- c("sigmoid", "tanh", "relu")  # Activations to compare
+holdout_hours <- 365 * 24                  # Last 365 days of hourly data
+results       <- list()
+
+# Loop over lag configurations
+for (day_lag in lags_to_test) {
+  # Prepare dataframe: include current temp + all lags from 1 to day_lag
+  ffnn_df <- merged_df %>%
+    select(date = periodFrom,
+           consumption = value,
+           temperature = temp) %>%
+    arrange(date)
+
+  # Create lag features cumulatively
+  for (i in 1:day_lag) {
+    ffnn_df <- ffnn_df %>%
+      mutate(
+        !!paste0("cons_lag", i) := lag(consumption, i * 24),
+        !!paste0("temp_lag", i) := lag(temperature, i * 24)
+      )
+  }
+  # Add current-day temperature
+  ffnn_df <- ffnn_df %>% mutate(temp_current = temperature)
+
+  # Remove rows with any missing lag values
+  lag_cols <- c(
+    paste0("cons_lag", 1:day_lag),
+    paste0("temp_lag", 1:day_lag)
+  )
+  ffnn_df <- ffnn_df %>% filter(if_all(all_of(lag_cols), ~ !is.na(.)))
+
+  # Split into train/test
+  train_df <- head(ffnn_df, -holdout_hours)
+  test_df  <- tail(ffnn_df, holdout_hours)
+
+  # Define variables to scale: consumption + current temp + all lag cols
+  scale_vars <- c("consumption", "temp_current", lag_cols)
+  preproc    <- preProcess(train_df[, scale_vars], method = c("center","scale"))
+  train_scaled <- predict(preproc, train_df)
+  test_scaled  <- predict(preproc, test_df)
+
+  # Prepare matrices for Keras: inputs are temp_current + all cons_lag/temp_lag
+  input_cols <- c("temp_current", lag_cols)
+  x_train <- as.matrix(train_scaled[, input_cols])
+  y_train <- train_scaled$consumption
+  x_test  <- as.matrix(test_scaled[, input_cols])
+  y_test  <- test_scaled$consumption
+
+  # Loop over activation functions
+  for (act in activations) {
+    # Build model
+    model <- keras_model_sequential() %>%
+      layer_dense(32, activation = act, input_shape = ncol(x_train)) %>%
+      layer_dense(16, activation = act) %>%
+      layer_dense(1,  activation = 'linear')
+    model %>% compile(
+      loss      = 'mse',
+      optimizer = optimizer_adam(),
+      metrics   = list('mean_absolute_error')
+    )
+
+    # Train model
+    model %>% fit(
+      x_train, y_train,
+      epochs     = 10,
+      batch_size = 32,
+      verbose    = 0
+    )
+
+    # Predict on test set
+    pred_scaled     <- model %>% predict(x_test)
+    mean_y          <- preproc$mean['consumption']
+    std_y           <- preproc$std['consumption']
+    pred_unscaled   <- as.vector(pred_scaled * std_y + mean_y)
+    actual_unscaled <- as.vector(y_test * std_y + mean_y)
+
+    # Compute metrics
+    valid_idx     <- !is.na(actual_unscaled) & !is.na(pred_unscaled)
+    actual_valid  <- actual_unscaled[valid_idx]
+    pred_valid    <- pred_unscaled[valid_idx]
+    r2 <- if(length(actual_valid) > 1 && sd(actual_valid) > 0 && sd(pred_valid) > 0) cor(actual_valid, pred_valid)^2 else NA_real_
+    nonzero_idx <- actual_valid != 0
+    mape <- if(any(nonzero_idx)) mean(abs((actual_valid[nonzero_idx] - pred_valid[nonzero_idx]) / actual_valid[nonzero_idx]))*100 else NA_real_
+
+    # Store result
+    results[[paste0('lag', day_lag, '_', act)]] <- tibble(
+      lag        = day_lag,
+      activation = act,
+      R2         = r2,
+      MAPE       = mape
+    )
+
+    # Plot for this combination: full year, formatted axes
+    plot_df <- tibble(
+      date      = test_df$date,
+      Actual    = actual_unscaled,
+      Predicted = pred_unscaled
+    ) %>% arrange(date)
+
+    p <- ggplot(plot_df, aes(x = date)) +
+        geom_point(aes(y = Actual,    color = 'Actual'), alpha = 0.6, size = 0.5) +
+        geom_point(aes(y = Predicted, color = 'Predicted'), alpha = 0.6, size = 0.5) +
+        scale_color_manual(values = c('Actual'='blue','Predicted'='red')) +
+        scale_x_datetime(date_breaks='1 month', date_labels='%b %Y', expand=c(0,0)) +
+        scale_y_continuous(labels=scales::comma) +
+      labs(title = paste0("Lag = ", day_lag, " day(s), Activation = ", act,
+                          ", R² = ", round(r2, 3),
+                          ", MAPE = ", round(mape, 1), "%"),
+           subtitle = paste0("Test: ", format(min(plot_df$date), "%Y-%m-%d"),
+                             " to ", format(max(plot_df$date), "%Y-%m-%d")),
+           x = "Date", y = "Consumption") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p)
+  }
+}
+
+# Combine and display summary table
+final_results <- bind_rows(results)
+print(final_results)
+
+```
+
+
+```{r}
+# --- FFNN: Cumulative Lags Comparison ---
+
+# Configuration
+lags_to_test  <- 1:3                       # Number of days lag to test
+activations   <- c("sigmoid", "tanh", "relu")  # Activation functions
+holdout_hours <- 365 * 24                  # Last 365 days of hourly data
+results       <- list()
+
+# Helper to run FFNN for given features
+run_ffnn <- function(feature_type) {
+  for (day_lag in lags_to_test) {
+    offset <- day_lag * 24
+    df <- merged_df %>%
+      select(date = periodFrom,
+             consumption = value,
+             temperature = temp) %>%
+      arrange(date)
+
+    # Create lag features based on type
+    if (feature_type == "temp") {
+      for (i in 1:day_lag) {
+        df <- df %>% mutate(!!paste0("temp_lag", i) := lag(temperature, i * 24))
+      }
+      input_cols <- c("temp_current", paste0("temp_lag", 1:day_lag))
+    } else if (feature_type == "cons") {
+      for (i in 1:day_lag) {
+        df <- df %>% mutate(!!paste0("cons_lag", i) := lag(consumption, i * 24))
+      }
+      input_cols <- c("temp_current", paste0("cons_lag", 1:day_lag))
+    }
+    df <- df %>% mutate(temp_current = temperature)
+    lag_cols <- input_cols[input_cols != "temp_current"]
+    df <- df %>% filter(if_all(all_of(lag_cols), ~ !is.na(.)))
+
+    # Split into train/test
+    train_df <- head(df, -holdout_hours)
+    test_df  <- tail(df, holdout_hours)
+
+    # Scale
+    scale_vars <- c("consumption", input_cols)
+    preproc    <- preProcess(train_df[, scale_vars], method = c("center","scale"))
+    train_s    <- predict(preproc, train_df)
+    test_s     <- predict(preproc, test_df)
+
+    # Prepare matrices
+    x_train <- as.matrix(train_s[, input_cols])
+    y_train <- train_s$consumption
+    x_test  <- as.matrix(test_s[, input_cols])
+    y_test  <- test_s$consumption
+
+    # Loop over activations
+    for (act in activations) {
+      model <- keras_model_sequential() %>%
+        layer_dense(32, activation = act, input_shape = ncol(x_train)) %>%
+        layer_dense(16, activation = act) %>%
+        layer_dense(1,  activation = 'linear')
+      model %>% compile(loss='mse', optimizer=optimizer_adam(), metrics=list('mean_absolute_error'))
+      model %>% fit(x_train, y_train, epochs=10, batch_size=32, verbose=0)
+
+      # Predict and inverse scale
+      pred_scaled     <- model %>% predict(x_test)
+      mean_y          <- preproc$mean['consumption']
+      std_y           <- preproc$std['consumption']
+      pred_unscaled   <- as.vector(pred_scaled * std_y + mean_y)
+      actual_unscaled <- as.vector(y_test * std_y + mean_y)
+
+      # Metrics
+      valid_idx     <- !is.na(actual_unscaled) & !is.na(pred_unscaled)
+      actual_valid  <- actual_unscaled[valid_idx]
+      pred_valid    <- pred_unscaled[valid_idx]
+      r2 <- if(length(actual_valid)>1 && sd(actual_valid)>0 && sd(pred_valid)>0) cor(actual_valid, pred_valid)^2 else NA_real_
+      nonzero_idx   <- actual_valid != 0
+      mape          <- if(any(nonzero_idx)) mean(abs((actual_valid[nonzero_idx]-pred_valid[nonzero_idx])/actual_valid[nonzero_idx]))*100 else NA_real_
+
+      # Store results
+      key <- paste(feature_type, 'lag', day_lag, act, sep='_')
+      results[[key]] <<- tibble(
+        feature    = feature_type,
+        lag        = day_lag,
+        activation = act,
+        R2         = r2,
+        MAPE       = mape
+      )
+
+            # Plot: use scatter for readability
+      plot_df <- tibble(date=test_df$date, Actual=actual_unscaled, Predicted=pred_unscaled) %>% arrange(date)
+      p <- ggplot(plot_df, aes(x = date)) +
+        geom_point(aes(y = Actual,    color = 'Actual'), alpha = 0.6, size = 0.5) +
+        geom_point(aes(y = Predicted, color = 'Predicted'), alpha = 0.6, size = 0.5) +
+        scale_color_manual(values = c('Actual'='blue','Predicted'='red')) +
+        scale_x_datetime(date_breaks='1 month', date_labels='%b %Y', expand=c(0,0)) +
+        scale_y_continuous(labels=scales::comma) +
+      labs(title = paste0("Feature = ", feature_type, "Lag = ", day_lag, " day(s), Activation = ", act,
+                          ", R² = ", round(r2, 3),
+                          ", MAPE = ", round(mape, 1), "%"),
+           subtitle = paste0("Test: ", format(min(plot_df$date), "%Y-%m-%d"),
+                             " to ", format(max(plot_df$date), "%Y-%m-%d")),
+           x = "Date", y = "Consumption") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p)
+    }
+  }
+}
+
+# Run for temperature-only and consumption-only lags
+run_ffnn("temp")
+run_ffnn("cons")
+
+# Display summary results
+final_results <- bind_rows(results)
+print(final_results)
+
+```
+
+
+
+
+```{r}
+# Prepare daily aggregated scatter data
+daily_df <- merged_df %>%
+  mutate(
+    date_day = as_date(periodFrom)
+  ) %>%
+  group_by(date_day) %>%
+  summarize(
+    avg_temp = mean(temp, na.rm = TRUE),
+    avg_consumption = mean(value, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Plot daily scatter with least-squares trend line
+p_daily <- ggplot(daily_df, aes(x = avg_temp, y = avg_consumption)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(
+    title = "Daily Avg Gas Consumption vs Daily Avg Temperature",
+    x = "Average Daily Temperature (°C)",
+    y = "Average Daily Gas Consumption (kWh/h)"
+  ) +
+  theme_minimal()
+
+print(p_daily)
+
+```
+
+
+## Conclusion and Next Steps 
+
+Due to the complexity of the Ravnik et al. [@ravnik2021sigmoid] paper its models could not be completely replicated for the Luxembourg dataset. Gas consumption data was also difficult to obtain for specific regions in Western Europe and Luxembourg was the only country/region that covered the requirements for this implementation. 
+
+Future improvements and extensions of the project would include the simpler sigmoid model as well as the Recursive Neural Network (RNN) for more datasets such as the ones in Greece. 
+
+## References
+
+
+
+
+
+
