@@ -15,7 +15,7 @@ Forecast day-ahead or hour-ahead residential gas consumption using temperature s
 
 ## 3) Feature engineering
 Two families of inputs:
-- **Non-cumulative lags (k = 1…3 days):** current temperature plus \(T_{j-k}\) and \(P_{j-k}\)
+- **Non-cumulative lags (k = 1…3 days):** current temperature plus $T_{j-k}$ and $P_{j-k}$
 - **Cumulative lags (k = 1…3 days):** current temperature plus all lags up to k for either both series, temperature-only, or consumption-only
 
 \(P\) = consumption, \(T\) = temperature. Day lags are 24-hour offsets. No holiday or calendar features yet.
